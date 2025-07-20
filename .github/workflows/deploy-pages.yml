@@ -38,6 +38,7 @@ on:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
+  actions: write
   contents: write
   pages: write
   id-token: write
@@ -58,6 +59,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set mod mirror environment variables
+        uses: ./.github/actions/set-mirror-env
 
       - uses: actions/setup-node@v4
         with:
@@ -94,7 +98,7 @@ jobs:
       - name: Download mirror metadata
         run: |
           mkdir -p downloaded_files
-          wget "https://github.com/$GITHUB_REPOSITORY/releases/download/mod-mirror/metadata.json?`date +%s`" -O downloaded_files/metadata.json
+          wget "https://github.com/$GITHUB_REPOSITORY/releases/download/mirror-metadata/metadata.json?`date +%s`" -O downloaded_files/metadata.json
 
       - name: Upload cache.txz
         uses: actions/upload-artifact@v4
@@ -149,19 +153,35 @@ jobs:
           cd ../../mod-mirror
 
           find -type f | while read file; do
-            gh release upload mod-mirror "$file" || true
+            if [[ "$file" != "metadata.json" ]] && [[ "$file" != "./metadata.json" ]]; then
+              gh release upload "${{ env.MIRROR_RELEASE }}" "$file"
+            fi
           done
 
           if [ -f "metadata.json" ]; then
-            gh release upload mod-mirror --clobber "metadata.json"
+            gh release upload "${{ env.MIRROR_METADATA_RELEASE }}" --clobber "metadata.json"
           fi
 
-      - name: Update so-info.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Trigger so-info.json update if needed
         run: |
-          cd source/scripts
-          npx tsx ./update-so-info.ts
+          if ls ./mod-mirror/* 1> /dev/null 2>&1; then
+            response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              https://api.github.com/repos/${{ github.repository }}/actions/workflows/update-so-info.yml/dispatches \
+              -d '{"ref":"${{ github.ref }}"}')
+            if [ $response -ne 204 ]; then
+              echo "Workflow dispatch failed with response code $response"
+              exit 1
+            fi
+          fi
+
+      - name: Restore so-info.json cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ./source/website/public/so-info.json
+          key: so-info-
+          restore-keys: so-info-
 
       - name: Process the json (schedule)
         if: (github.event_name == 'schedule' || inputs.recheckUrls == true)
@@ -185,7 +205,6 @@ jobs:
             source/website/public/covers \
             source/website/public/funding-info.json \
             source/website/public/mod-metadata.json \
-            source/website/public/so-info.json
 
       - name: Build website
         run: |
